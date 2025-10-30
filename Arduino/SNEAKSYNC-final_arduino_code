@@ -1,0 +1,303 @@
+#include "HX711.h"
+#include <ArduinoBLE.h>
+#include <Arduino_LSM6DS3.h>
+#define PI 3.1415926535897932384626433832795
+const int yLOADCELL_DOUT_PIN = 2;
+const int yLOADCELL_SCK_PIN = 3;
+const int gLOADCELL_DOUT_PIN = 4; 
+const int gLOADCELL_SCK_PIN = 5;
+const int bLOADCELL_DOUT_PIN = 6;
+const int bLOADCELL_SCK_PIN = 7;
+unsigned long lastImuReadTime = 0;
+const unsigned long imuReadInterval = 50;
+unsigned long lastPressureReadTime = 0;
+const unsigned long pressureReadInterval = 400;
+
+HX711 yLoadCell;
+HX711 gLoadCell;
+HX711 bLoadCell;
+
+const int LED = 13;
+bool greer = false;
+
+// --- BLE Service and Characteristic UUIDs ---
+const char* serviceUuid = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const char* ypressureCharUuid = "f4377745-c73d-4d79-9d55-a50ca9e9f25f";
+const char* gpressureCharUuid = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+const char* bpressureCharUuid = "77c29869-e17c-43af-bbfc-e1e51b126d91";
+const char* accelCharUuid = "4754dea5-1358-4f9f-88ab-519005cf27b0";
+const char* rotCharUuid = "403a2bc1-6ad6-4d2d-9a5d-9871c9d76d45";
+
+
+// --- BLE Service and Characteristics ---
+BLEService sneakSyncService(serviceUuid);
+BLECharacteristic ypressureCharacteristic(ypressureCharUuid, BLERead | BLENotify, 20);
+BLECharacteristic gpressureCharacteristic(gpressureCharUuid, BLERead | BLENotify, 20); 
+BLECharacteristic bpressureCharacteristic(bpressureCharUuid, BLERead | BLENotify, 20);
+BLECharacteristic accelCharacteristic(accelCharUuid, BLERead | BLENotify, 50);
+BLECharacteristic rotCharacteristic(rotCharUuid, BLERead | BLENotify, 50);
+
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("HX711 Load Cell Reader with BLE (ArduinoBLE library)");
+  Serial.println("Initializing the scale...");
+
+  // --- LED Setup ---
+
+  pinMode(LED, OUTPUT); 
+  digitalWrite(LED, LOW);
+
+  // --- HX711 Setup ---
+
+  // Initialize the HX711 with the specified data and clock pins.
+  yLoadCell.begin(yLOADCELL_DOUT_PIN, yLOADCELL_SCK_PIN);
+  yLoadCell.set_gain(128);
+  yLoadCell.power_up();
+  Serial.println("yHX711 powered up. Waiting for first stable reading...");
+
+  gLoadCell.begin(gLOADCELL_DOUT_PIN, gLOADCELL_SCK_PIN);
+  gLoadCell.set_gain(128);
+  gLoadCell.power_up();
+  Serial.println("gHX711 powered up. Waiting for first stable reading...");
+
+  bLoadCell.begin(bLOADCELL_DOUT_PIN, bLOADCELL_SCK_PIN);
+  bLoadCell.set_gain(128);
+  bLoadCell.power_up();
+  Serial.println("bHX711 powered up. Waiting for first stable reading...");
+
+  // --- YELLOW LOADCELL ----
+
+  // Wait for the HX711 to become ready for the first reading.
+  unsigned long timeout = millis() + 5000; // 5 second timeout
+  while (!yLoadCell.is_ready() && millis() < timeout) {
+    delay(10); 
+  }
+
+  if (yLoadCell.is_ready()) {
+    Serial.println("yHX711 is ready!");
+    Serial.println("Performing tare... ensure no weight is on the sensor.");
+    yLoadCell.tare(); 
+    Serial.println("Tare done. Readings should now be near zero.");
+
+    // Calibration
+    yLoadCell.set_scale(450); 
+    Serial.println("Scale factor set. Now displaying both raw and calibrated readings.");
+
+  } else {
+    Serial.println("yHX711 not found or not ready after timeout. Check wiring and power.");
+    Serial.println("If this message persists, double-check all connections and power supply.");
+    while (true);
+  }
+
+  // --- GREEN LOADCELL --- 
+
+  timeout = millis() + 5000; // 5 second timeout
+  while (!gLoadCell.is_ready() && millis() < timeout) {
+    delay(10); // Wait a short moment
+  }
+
+  if (gLoadCell.is_ready()) {
+    Serial.println("gHX711 is ready!");
+    Serial.println("Performing tare... ensure no weight is on the sensor.");
+    gLoadCell.tare(); 
+    Serial.println("Tare done. Readings should now be near zero.");
+
+    // Calibration
+    gLoadCell.set_scale(425); 
+    Serial.println("Scale factor set. Now displaying both raw and calibrated readings.");
+
+  } else {
+    Serial.println("gHX711 not found or not ready after timeout. Check wiring and power.");
+    Serial.println("If this message persists, double-check all connections and power supply.");
+    while (true);
+  }
+
+  // --- BLUE LOADCELL ---
+  timeout = millis() + 5000; // 5 second timeout
+  while (!bLoadCell.is_ready() && millis() < timeout) {
+    delay(10); // Wait a short moment
+  }
+
+  if (bLoadCell.is_ready()) {
+    Serial.println("bHX711 is ready!");
+    Serial.println("Performing tare... ensure no weight is on the sensor.");
+    bLoadCell.tare(); 
+    Serial.println("Tare done. Readings should now be near zero.");
+
+    // Calibration
+    bLoadCell.set_scale(450); 
+    Serial.println("Scale factor set. Now displaying both raw and calibrated readings.");
+
+  } else {
+    Serial.println("bHX711 not found or not ready after timeout. Check wiring and power.");
+    Serial.println("If this message persists, double-check all connections and power supply.");
+    while (true);
+  }
+
+  // --- BLE Setup ---
+  
+  if (!BLE.begin()) {
+    Serial.println("Starting BLE failed!");
+    while (true);
+  }
+
+  // Set advertised local name and service UUID
+  BLE.setLocalName("SneakSync_ArdNanoIoT"); 
+  BLE.setAdvertisedService(sneakSyncService);
+ 
+  // Add characteristics to service
+  sneakSyncService.addCharacteristic(ypressureCharacteristic);
+  sneakSyncService.addCharacteristic(gpressureCharacteristic);
+  sneakSyncService.addCharacteristic(bpressureCharacteristic);
+  sneakSyncService.addCharacteristic(accelCharacteristic);
+  sneakSyncService.addCharacteristic(rotCharacteristic);
+
+  // Add services to BLE peripheral
+  BLE.addService(sneakSyncService);
+
+  // Set the initial value of the characteristic
+  ypressureCharacteristic.writeValue("0.00g");
+  gpressureCharacteristic.writeValue("0.00g");
+  bpressureCharacteristic.writeValue("0.00g");
+  accelCharacteristic.writeValue("X:0.000, Y:0.000, Z:0.000");
+  rotCharacteristic.writeValue("XX:0.00, YY:0.00, ZZ:0.00");
+  
+  // Start advertising
+  BLE.advertise();
+  Serial.println("BLE advertising started. Waiting for a central connection...");
+
+  // --- IMU Setup ---
+
+  if (!IMU.begin()) {
+    Serial.println("Failed to initialize IMU!");
+    while (true);
+  }
+  digitalWrite(LED, LOW);
+}
+
+// ============================= LOOP =============================
+
+void loop() {
+  
+  BLE.poll();
+  BLEDevice central = BLE.central();
+
+  // Check if central device connected
+  if (central) {
+    
+    digitalWrite(LED, HIGH); // Turn LED on when connected
+
+    // --- IMU ---
+
+    if(millis() - lastImuReadTime >= imuReadInterval){
+      lastImuReadTime = millis();
+      float x, y, z;
+      float xx, yy, zz;
+
+      if (IMU.accelerationAvailable() && IMU.gyroscopeAvailable()) {
+        IMU.readAcceleration(x, y, z);
+        IMU.readGyroscope(xx, yy, zz);
+
+        xx *= PI/180;
+        yy *= PI/180;
+        zz *= PI/180;
+
+        Serial.print(xx);
+        Serial.print('\t');
+        Serial.print(yy);
+        Serial.print('\t');
+        Serial.println(zz);
+
+        char accelStr[50];
+        char rotStr[50];
+        snprintf(accelStr, sizeof(accelStr), "%.3f,%.3f,%.3f", x, y, z);
+        snprintf(rotStr, sizeof(rotStr), "%.2f,%.2f,%.2f", xx, yy, zz);
+        accelCharacteristic.writeValue(accelStr);
+        rotCharacteristic.writeValue(rotStr);
+        
+      } else {
+        Serial.println("IMU acceleration/gyro not available");
+        
+          digitalWrite(LED, LOW);
+          delay(10);
+          digitalWrite(LED, HIGH);
+          delay(10);
+        
+      }
+    }
+
+
+
+    if(millis() - lastPressureReadTime >= pressureReadInterval){
+      lastPressureReadTime = millis();
+
+      while (!yLoadCell.is_ready()){
+        delay(5);
+        Serial.println("y Not Ready");
+      }
+      while (!gLoadCell.is_ready()){
+        delay(5);
+        Serial.println("g Not Ready");
+      }
+      while (!bLoadCell.is_ready()){
+        delay(5);
+        Serial.println("b Not Ready");
+      }
+
+      if (yLoadCell.is_ready() && gLoadCell.is_ready() && bLoadCell.is_ready()) {
+
+        long yraw_reading = yLoadCell.read();
+        float ycalibrated_weight = yLoadCell.get_units();
+        
+        long graw_reading = gLoadCell.read();
+        float gcalibrated_weight = gLoadCell.get_units();
+
+        long braw_reading = bLoadCell.read();
+        float bcalibrated_weight = bLoadCell.get_units();
+
+        // Print to Serial Monitor
+        Serial.print("yRaw HX711 reading: ");
+        Serial.print(yraw_reading);
+        Serial.print(" | Calibrated Weight: ");
+        Serial.print(ycalibrated_weight, 2);
+        Serial.println(" g");
+
+        Serial.print("gRaw HX711 reading: ");
+        Serial.print(graw_reading);
+        Serial.print(" | Calibrated Weight: ");
+        Serial.print(gcalibrated_weight, 2);
+        Serial.println(" g");
+
+        Serial.print("bRaw HX711 reading: ");
+        Serial.print(braw_reading);
+        Serial.print(" | Calibrated Weight: ");
+        Serial.print(bcalibrated_weight, 2);
+        Serial.println(" g");
+
+        // Update BLE characteristic
+        char ypresStr[16];
+        char gpresStr[16]; 
+        char bpresStr[16];
+        snprintf(ypresStr, sizeof(ypresStr), "%.2fg", -1*ycalibrated_weight);
+        snprintf(gpresStr, sizeof(gpresStr), "%.2fg", -1*gcalibrated_weight);
+        snprintf(bpresStr, sizeof(bpresStr), "%.2fg", -1*bcalibrated_weight);
+        ypressureCharacteristic.writeValue(ypresStr);
+        gpressureCharacteristic.writeValue(gpresStr);
+        bpressureCharacteristic.writeValue(bpresStr); 
+      } else {
+        Serial.println("HX711 did not become ready for a new conversion within 1 second.");
+        
+      }
+    }
+
+  } else {
+    digitalWrite(LED, LOW);
+    delay(500);
+    digitalWrite(LED, HIGH);
+    delay(500); // Slow flash LED when disconnected
+    Serial.println("Not connected.");
+  }
+  
+  
+}
